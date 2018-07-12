@@ -139,7 +139,7 @@ ut64 analyzeStackBased(RCore *core, Sdb *db, ut64 addr, RList *delayed_commands)
 		free (value);
 		cur = 0;
 		while (!block_end) {
-			op = r_core_anal_op (core, addr + cur);
+			op = r_core_anal_op (core, addr + cur, R_ANAL_OP_MASK_BASIC);
 			if (!op || !op->mnemonic) {
 				eprintf ("Cannot analyze opcode at %"PFMT64d"\n", addr+cur);
 				oaddr = UT64_MAX;
@@ -391,8 +391,6 @@ RCorePlugin r_core_plugin_anal = {
 	.desc = "The reworked analysis from scratch thing",
 	.license = "LGPL3",
 	.call = r_cmd_anal_call,
-	.deinit = NULL,
-	.init = NULL,
 };
 
 #ifndef CORELIB

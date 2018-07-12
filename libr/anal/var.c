@@ -366,6 +366,25 @@ R_API void r_anal_var_free(RAnalVar *av) {
 	}
 }
 
+R_API ut64 r_anal_var_addr(RAnal *a, RAnalFunction *fcn, const char *name) {
+	const char *regname = NULL;
+	ut64 ret = UT64_MAX;
+	if (!a || !fcn) {
+		return ret;
+	}
+	RAnalVar *v1 = r_anal_var_get_byname (a, fcn, name);
+	if (v1) {
+		if (v1->kind == R_ANAL_VAR_KIND_BPV) {
+			regname = r_reg_get_name (a->reg, R_REG_NAME_BP);
+		} else if (v1->kind == R_ANAL_VAR_KIND_SPV) {
+			regname = r_reg_get_name (a->reg, R_REG_NAME_SP);
+		}
+		ret = r_reg_getv (a->reg, regname) + v1->delta;
+	}
+	r_anal_var_free (v1);
+	return ret;
+}
+
 /* (columns) elements in the array value */
 #define R_ANAL_VAR_SDB_KIND 0 /* char */
 #define R_ANAL_VAR_SDB_TYPE 1 /* string */
@@ -434,6 +453,14 @@ R_API int r_anal_var_rename(RAnal *a, ut64 var_addr, int scope, char kind, const
 	}
 	// var.sdb_hash(old_name)=var_addr.scope.delta
 	return 1;
+}
+
+// Used for linking reg based arg and local-var like "mov [local_8h], rsi"
+static void r_anal_var_link (RAnal *a, ut64 addr, RAnalVar *var) {
+	const char *inst_key = sdb_fmt ("inst.0x%"PFMT64x ".lvar", addr);
+	const char *var_def = sdb_fmt ("0x%"PFMT64x ",%c,0x%x,0x%x", var->addr,
+			var->kind, var->scope, var->delta);
+	sdb_set (DB, inst_key, var_def, 0);
 }
 
 // avr
@@ -540,6 +567,165 @@ static void var_add_structure_fields_to_list(RAnal *a, RAnalVar *av, const char 
 		}
 		free (type_key);
 	}
+}
+
+#define VARPREFIX "local"
+#define ARGPREFIX "arg"
+
+//Variable recovery functions
+static char *get_varname(RAnal *a, RAnalFunction *fcn, char type, const char *pfx, int idx) {
+	char *varname = r_str_newf ("%s_%xh", pfx, idx);
+	int i = 2;
+	char v_kind;
+	int v_delta;
+	while (1) {
+		char *name_key = sdb_fmt ("var.0x%"PFMT64x ".%d.%s", fcn->addr, 1, varname);
+		char *name_value = sdb_get (a->sdb_fcns, name_key, 0);
+		if (!name_value) {
+			break;
+		}
+		const char *comma = strchr (name_value, ',');
+		if (comma && *comma) {
+			v_delta = r_num_math (NULL, comma + 1);
+			v_kind = *name_value;
+		}
+		if (v_kind == type && R_ABS (v_delta) == idx) {
+			free (name_value);
+			return varname;
+		}
+		free (varname);
+		free (name_value);
+		varname = r_str_newf ("%s_%xh_%d", pfx, idx, i);
+		i++;
+	}
+	return varname;
+}
+
+static const char *get_regname(RAnal *anal, RAnalValue *value) {
+	const char *name = NULL;
+	if (value && value->reg && value->reg->name) {
+		name = value->reg->name;
+		RRegItem *ri = r_reg_get (anal->reg, value->reg->name, -1);
+		if (ri && (ri->size == 32) && (anal->bits == 64)) {
+			name = r_reg_32_to_64 (anal->reg, value->reg->name);
+		}
+	}
+	return name;
+}
+
+static void extract_arg(RAnal *anal, RAnalFunction *fcn, RAnalOp *op, const char *reg, const char *sign, char type) {
+	char sigstr[16] = {0};
+	st64 ptr;
+	char *addr;
+	if (!anal || !fcn || !op) {
+		return;
+	}
+	snprintf (sigstr, sizeof (sigstr), ",%s,%s", reg, sign);
+	const char *op_esil = r_strbuf_get (&op->esil);
+	if (!op_esil) {
+		return;
+	}
+	char *esil_buf = strdup (op_esil);
+	if (!esil_buf) {
+		return;
+	}
+	char *ptr_end = strstr (esil_buf, sigstr);
+	if (!ptr_end) {
+		free (esil_buf);
+		return;
+	}
+	*ptr_end = 0;
+	addr = ptr_end;
+	while ((addr[0] != '0' || addr[1] != 'x') && addr >= esil_buf + 1 && *addr != ',') {
+		addr--;
+	}
+	if (strncmp (addr, "0x", 2)) {
+		//XXX: This is a workaround for inconsistent esil
+		if ((op->stackop == R_ANAL_STACK_SET) || (op->stackop == R_ANAL_STACK_GET)) {
+			ptr = R_ABS (op->ptr);
+			if (ptr%4) {
+				goto beach;
+			}
+		} else {
+			goto beach;
+		}
+	} else {
+		ptr = (st64) r_num_get (NULL, addr);
+	}
+	int rw = (op->direction == R_ANAL_OP_DIR_WRITE) ? 1 : 0;
+	if (*sign == '+') {
+		const char *pfx = ((ptr < fcn->maxstack) && (type == 's')) ? VARPREFIX : ARGPREFIX;
+		bool isarg = strcmp(pfx , ARGPREFIX) ? false : true;
+		char *varname = get_varname (anal, fcn, type, pfx, R_ABS (ptr));
+		r_anal_var_add (anal, fcn->addr, 1, ptr, type, NULL, anal->bits / 8, isarg, varname);
+		r_anal_var_access (anal, fcn->addr, type, 1, ptr, rw, op->addr);
+		free (varname);
+	} else {
+		char *varname = get_varname (anal, fcn, type, VARPREFIX, R_ABS (ptr));
+		r_anal_var_add (anal, fcn->addr, 1, -ptr, type, NULL, anal->bits / 8, 0, varname);
+		r_anal_var_access (anal, fcn->addr, type, 1, -ptr, rw, op->addr);
+		free (varname);
+	}
+beach:
+	free (esil_buf);
+}
+
+R_API void extract_rarg(RAnal *anal, RAnalOp *op, RAnalFunction *fcn, int *reg_set, int *count) {
+	const char *opsreg = NULL;
+	const char *opdreg = NULL;
+	int i, delta = 0;
+
+	if (!anal || !op || !fcn) {
+		return;
+	}
+	int max_count = r_anal_cc_max_arg (anal, fcn->cc);
+	if (!max_count || (*count >= max_count)) {
+		return;
+	}
+	if (op->src[0]) {
+		opsreg = get_regname (anal, op->src[0]);
+	}
+	if (op->dst) {
+		opdreg = get_regname (anal, op->dst);
+	}
+	if (opsreg) {
+		RRegItem *ri = r_reg_get (anal->reg, opsreg, -1);
+		if (ri) {
+			delta = ri->index;
+		}
+	}
+	for (i = 0; i < max_count; i++) {
+		const char *regname = r_anal_cc_arg (anal, fcn->cc, i + 1);
+		// reg_set enusres we only extract first-read argument reg
+		if (!reg_set [i] && regname) {
+			if (op->src[0] && opsreg && !strcmp (opsreg, regname)) {
+				char *vname = r_str_newf ("%s%d", "arg", i + 1);
+				r_anal_var_add (anal, fcn->addr, 1, delta, 'r', NULL, anal->bits / 8,
+						1, vname);
+				if (op->var && op->var->kind != 'r') {
+					r_anal_var_link (anal, op->addr, op->var);
+				}
+				r_anal_var_access (anal, fcn->addr, 'r', 1, delta, 0, op->addr);
+				r_meta_set_string (anal, R_META_TYPE_COMMENT, op->addr, vname);
+				free (vname);
+			}
+			if (op->dst && opdreg && !strcmp (opdreg, regname)) {
+				reg_set [i] = 1;
+				count++;
+			}
+		}
+	}
+}
+
+R_API void extract_vars(RAnal *anal, RAnalFunction *fcn, RAnalOp *op) {
+	if (!anal || !fcn || !op) {
+		return;
+	}
+	const char *BP = anal->reg->name[R_REG_NAME_BP];
+	const char *SP =  anal->reg->name[R_REG_NAME_SP];
+	extract_arg (anal, fcn, op, BP, "+", 'b');
+	extract_arg (anal, fcn, op, BP, "-", 'b');
+	extract_arg (anal, fcn, op, SP, "+", 's');
 }
 
 static RList *var_generate_list(RAnal *a, RAnalFunction *fcn, int kind, bool dynamicVars) {
@@ -727,7 +913,7 @@ R_API void r_anal_var_list_show(RAnal *anal, RAnalFunction *fcn, int kind, int m
 					eprintf ("Register not found");
 					break;
 				}
-				anal->cb_printf ("reg %s %s @ %s\n",
+				anal->cb_printf ("arg %s %s @ %s\n",
 					var->type, var->name, i->name);
 				}
 				break;

@@ -9,6 +9,7 @@
 
 /* arm64 */
 #define IMM64(x) (ut64)(insn->detail->arm64.operands[x].imm)
+#define INSOP64(x) insn->detail->arm64.operands[x]
 
 /* arm32 */
 #define REG(x) r_str_get (cs_reg_name (*handle, insn->detail->arm.operands[x].reg))
@@ -16,6 +17,7 @@
 #define REGID64(x) insn->detail->arm64.operands[x].reg
 #define REGID(x) insn->detail->arm.operands[x].reg
 #define IMM(x) (ut32)(insn->detail->arm.operands[x].imm)
+#define INSOP(x) insn->detail->arm.operands[x]
 #define MEMBASE(x) r_str_get (cs_reg_name(*handle, insn->detail->arm.operands[x].mem.base))
 #define MEMBASE64(x) r_str_get (cs_reg_name(*handle, insn->detail->arm64.operands[x].mem.base))
 #define REGBASE(x) insn->detail->arm.operands[x].mem.base
@@ -2141,6 +2143,17 @@ static void anop64 (csh handle, RAnalOp *op, cs_insn *insn) {
 		op->family = R_ANAL_OP_FAMILY_CPU;
 	}
 
+	switch (insn->detail->arm64.cc) {
+	case ARM64_CC_GE:
+	case ARM64_CC_GT:
+	case ARM64_CC_LE:
+	case ARM64_CC_LT:
+		op->sign = true;
+		break;
+	default:
+		break;
+	}
+
 	switch (insn->id) {
 	case ARM64_INS_SVC:
 		op->type = R_ANAL_OP_TYPE_SWI;
@@ -2273,6 +2286,8 @@ static void anop64 (csh handle, RAnalOp *op, cs_insn *insn) {
 	case ARM64_INS_LDUR:
 	case ARM64_INS_LDURB:
 	case ARM64_INS_LDRSW:
+	case ARM64_INS_LDRSB:
+	case ARM64_INS_LDRSH:
 	case ARM64_INS_LDR:
 	case ARM64_INS_LDP:
 	case ARM64_INS_LDNP:
@@ -2280,6 +2295,14 @@ static void anop64 (csh handle, RAnalOp *op, cs_insn *insn) {
 	case ARM64_INS_LDRH:
 	case ARM64_INS_LDRB:
 		op->type = R_ANAL_OP_TYPE_LOAD;
+		switch (insn->id) {
+		case ARM64_INS_LDPSW:
+		case ARM64_INS_LDRSW:
+		case ARM64_INS_LDRSH:
+		case ARM64_INS_LDRSB:
+			op->sign = true;
+			break;
+		}
 		if (REGBASE64(1) == ARM64_REG_X29) {
 			op->stackop = R_ANAL_STACK_GET;
 			op->stackptr = 0;
@@ -2670,6 +2693,106 @@ jmp $$ + 4 + ( [delta] * 2 )
 	}
 }
 
+#define ZERO_FILL(x) memset (&x, 0, sizeof (x))
+
+static int parse_reg_name(RRegItem *reg, csh handle, cs_insn *insn, int reg_num) {
+	if (!reg) {
+		return -1;
+	}
+	switch (INSOP (reg_num).type) {
+	case ARM_OP_REG:
+		reg->name = (char *)cs_reg_name (handle, INSOP (reg_num).reg);
+		break;
+	case ARM_OP_MEM:
+		if (INSOP (reg_num).mem.base != ARM_REG_INVALID) {
+			reg->name = (char *)cs_reg_name (handle, INSOP (reg_num).mem.base);
+		}
+		break;
+	default:
+		break;
+	}
+	return 0;
+}
+
+static int parse_reg64_name(RRegItem *reg, csh handle, cs_insn *insn, int reg_num) {
+	if (!reg) {
+		return -1;
+	}
+	switch (INSOP64 (reg_num).type) {
+	case ARM64_OP_REG:
+		reg->name = (char *)cs_reg_name (handle, INSOP64 (reg_num).reg);
+		break;
+	case ARM64_OP_MEM:
+		if (INSOP64 (reg_num).mem.base != ARM64_REG_INVALID) {
+			reg->name = (char *)cs_reg_name (handle, INSOP64 (reg_num).mem.base);
+		}
+		break;
+	default:
+		break;
+	}
+	return 0;
+}
+
+static void set_opdir(RAnalOp *op) {
+	switch (op->type & R_ANAL_OP_TYPE_MASK) {
+	case R_ANAL_OP_TYPE_LOAD:
+		op->direction = R_ANAL_OP_DIR_READ;
+		break;
+	case R_ANAL_OP_TYPE_STORE:
+		op->direction = R_ANAL_OP_DIR_WRITE;
+		break;
+	case R_ANAL_OP_TYPE_LEA:
+		op->direction = R_ANAL_OP_DIR_REF;
+		break;
+	case R_ANAL_OP_TYPE_CALL:
+	case R_ANAL_OP_TYPE_JMP:
+	case R_ANAL_OP_TYPE_UJMP:
+	case R_ANAL_OP_TYPE_UCALL:
+		op->direction = R_ANAL_OP_DIR_EXEC;
+		break;
+	default:
+		break;
+        }
+}
+
+static void op_fillval(RAnalOp *op , csh handle, cs_insn *insn, int bits) {
+	static RRegItem reg;
+	switch (op->type & R_ANAL_OP_TYPE_MASK) {
+	case R_ANAL_OP_TYPE_LOAD:
+		op->src[0] = r_anal_value_new ();
+		ZERO_FILL (reg);
+		op->src[0]->reg = &reg;
+		if (bits == 64) {
+			parse_reg64_name (op->src[0]->reg, handle, insn, 1);
+			op->src[0]->delta = MEMDISP64(1);
+		} else {
+			parse_reg_name (op->src[0]->reg, handle, insn, 1);
+			op->src[0]->delta = MEMDISP(1);
+		}
+		break;
+	case R_ANAL_OP_TYPE_STORE:
+		op->dst = r_anal_value_new ();
+		ZERO_FILL (reg);
+		op->dst->reg = &reg;
+		if (bits == 64) {
+			parse_reg64_name (op->dst->reg, handle, insn, 1);
+			op->dst->delta = MEMDISP64(1);
+		} else {
+			parse_reg_name (op->dst->reg, handle, insn, 1);
+			op->dst->delta = MEMDISP(1);
+		}
+		break;
+	default:
+		break;
+	}
+	if ((bits == 64) && HASMEMINDEX64 (1)) {
+		op->ireg = r_str_get (cs_reg_name(handle, INSOP64 (1).mem.index));
+	} else if (HASMEMINDEX (1)) {
+		op->ireg = r_str_get (cs_reg_name(handle, INSOP (1).mem.index));
+		op->scale = INSOP (1).mem.scale;
+	}
+}
+
 static int analop(RAnal *a, RAnalOp *op, ut64 addr, const ut8 *buf, int len) {
 	static csh handle = 0;
 	static int omode = -1;
@@ -2725,6 +2848,10 @@ static int analop(RAnal *a, RAnalOp *op, ut64 addr, const ut8 *buf, int len) {
 			if (a->decode) {
 				analop_esil (a, op, addr, buf, len, &handle, insn, thumb);
 			}
+		}
+		set_opdir (op);
+		if (a->fillval) {
+			op_fillval (op, handle, insn, a->bits);
 		}
 		cs_free (insn, n);
 	}

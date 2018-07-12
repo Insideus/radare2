@@ -31,6 +31,74 @@ static const char *printfmtColumns[] = {
 	"pCw", "pCc", "pCA", "pss", "prc", "pCa", "pxr"
 };
 
+static const char *help_msg_visual[] = {
+	"?", "show this help",
+	"??", "show the user-friendly hud",
+	"%", "in cursor mode finds matching pair, otherwise toggle autoblocksz",
+	"@", "redraw screen every 1s (multi-user view), in cursor set position",
+	"^", "seek to the begining of the function",
+	"!", "enter into the visual panels mode",
+	"_", "enter the flag/comment/functions/.. hud (same as VF_)",
+	"=", "set cmd.vprompt (top row)",
+	"|", "set cmd.cprompt (right column)",
+	".", "seek to program counter",
+	"#", "toggle bytes in disasm view",
+	"\\", "toggle visual split mode",
+	"\"", "toggle the column mode (uses pC..)",
+	"/", "in cursor mode search in current block",
+	"(", "toggle snow",
+	")", "toggle emu.str",
+	":cmd", "run radare command",
+	";[-]cmt", "add/remove comment",
+	"0", "seek to beginning of current function",
+	"[1-9]", "follow jmp/call identified by shortcut (like ;[1])",
+	",file", "add a link to the text file",
+	"/*+-[]", "change block size, [] = resize hex.cols",
+	"</>", "seek aligned to block size (seek cursor in cursor mode)",
+	"a/A", "(a)ssemble code, visual (A)ssembler",
+	"b", "browse symbols, flags, configurations, classes, ...",
+	"B", "toggle breakpoint",
+	"c/C", "toggle (c)ursor and (C)olors",
+	"d[f?]", "define function, data, code, ..",
+	"D", "enter visual diff mode (set diff.from/to)",
+	"e", "edit eval configuration variables",
+	"f/F", "set/unset or browse flags. f- to unset, F to browse, ..",
+	"gG", "go seek to begin and end of file (0-$s)",
+	"hjkl", "move around (or HJKL) (left-down-up-right)",
+	"i", "insert hex or string (in hexdump) use tab to toggle",
+	"I", "insert hexpair block ",
+	"mK/'K", "mark/go to Key (any key)",
+	"M", "walk the mounted filesystems",
+	"n/N", "seek next/prev function/flag/hit (scr.nkey)",
+	"o", "go/seek to given offset",
+	"O", "toggle asm.pseudo and asm.esil",
+	"p/P", "rotate print modes (hex, disasm, debug, words, buf)",
+	"q", "back to radare shell",
+	"r", "toggle jmphints/leahints",
+	"R", "randomize color palette (ecr)",
+	"sS", "step / step over",
+	"T", "enter textlog chat console (TT)",
+	"uU", "undo/redo seek",
+	"v", "visual function/vars code analysis menu",
+	"V", "(V)iew interactive ascii art graph (agfv)",
+	"wW", "seek cursor to next/prev word",
+	"xX", "show xrefs/refs of current function from/to data/code",
+	"yY", "copy and paste selection",
+	"z", "fold/unfold comments in disassembly",
+	"Z", "toggle zoom mode",
+	"Enter", "follow address of jump/call",
+	NULL
+};
+
+static const char *help_msg_visual_fn[] = {
+	"F2", "toggle breakpoint",
+	"F4", "run to cursor",
+	"F7", "single step",
+	"F8", "step over",
+	"F9", "continue",
+	NULL
+};
+
 static const char **printfmt = printfmtSingle;
 
 static bool splitView = false;
@@ -44,7 +112,7 @@ static int visual_repeat_thread_anykey(RThread *th) {
 	RCore *core = th->user;
 	r_cons_any_key (NULL);
 	eprintf ("^C  \n");
-	core->cons->breaked = true;
+	core->cons->context->breaked = true;
 	return 0;
 }
 
@@ -64,7 +132,7 @@ static int visual_repeat_thread(RThread *th) {
 		r_sys_sleep (1);
 	}
 	r_cons_break_pop ();
-	core->cons->breaked = true;
+	core->cons->context->breaked = true;
 	r_th_wait (th);
 	return 0;
 }
@@ -143,7 +211,7 @@ static void visual_repeat(RCore *core) {
 #if __UNIX__ && !__APPLE__
 // TODO: Add support for iterm2 and terminal for mac, see rarop source for more info
 		int port = r_config_get_i (core->config, "http.port");
-		if (!r_core_rtr_http (core, '&', NULL)) {
+		if (!r_core_rtr_http (core, '&', 'H', NULL)) {
 			const char *xterm = r_config_get (core->config, "cmd.xterm");
 			// TODO: this must be configurable
 			r_sys_cmdf ("%s 'r2 -C http://localhost:%d/cmd/V;sleep 1' &", xterm, port);
@@ -237,70 +305,37 @@ R_API int r_core_visual_hud(RCore *core) {
 	return (int) (size_t) p;
 }
 
+static void append_help(RStrBuf *p, const char *title, const char **help) {
+	int i, max_length = 0, padding = 0;
+	RCons *cons = r_cons_singleton ();
+	const char *pal_args_color = cons->color ? cons->pal.args : "",
+		   *pal_help_color = cons->color ? cons->pal.help : "",
+		   *pal_reset = cons->color ? cons->pal.reset : "";
+	for (i = 0; help[i]; i += 2) {
+		max_length = R_MAX (max_length, strlen (help[i]));
+	}
+	r_strbuf_appendf (p, "|%s:\n", title);
+
+	for (i = 0; help[i]; i += 2) {
+		padding = max_length - (strlen (help[i]));
+		r_strbuf_appendf (p, "| %s%s%*s  %s%s%s\n",
+			 pal_args_color, help[i],
+			 padding, "",
+			 pal_help_color, help[i + 1], pal_reset);
+	}
+}
+
 static int visual_help() {
+	RStrBuf *p = r_strbuf_new (NULL);
+	if (!p) {
+		return 0;
+	}
 	r_cons_clear00 ();
-	return r_cons_less_str (
-		"Visual mode help:\n"
-		" ?        show this help\n"
-		" ??       show the user-friendly hud\n"
-		" %        in cursor mode finds matching pair, otherwise toggle autoblocksz\n"
-		" @        redraw screen every 1s (multi-user view), in cursor set position\n"
-		" ^        seek to the begining of the function\n"
-		" !        enter into the visual panels mode\n"
-		" _        enter the flag/comment/functions/.. hud (same as VF_)\n"
-		" =        set cmd.vprompt (top row)\n"
-		" |        set cmd.cprompt (right column)\n"
-		" .        seek to program counter\n"
-		" \\        toggle visual split mode\n"
-		" \"        toggle the column mode (uses pC..)\n"
-		" /        in cursor mode search in current block\n"
-		" (        toggle snow\n"
-		" )        toggle emu.str\n"
-		" :cmd     run radare command\n"
-		" ;[-]cmt  add/remove comment\n"
-		" 0        seek to beginning of current function\n"
-		" [1-9]    follow jmp/call identified by shortcut (like ;[1])\n"
-		" ,file    add a link to the text file\n"
-		" /*+-[]   change block size, [] = resize hex.cols\n"
-		" </>      seek aligned to block size (seek cursor in cursor mode)\n"
-		" a/A      (a)ssemble code, visual (A)ssembler\n"
-		" b        browse symbols, flags, configurations, classes, ...\n"
-		" B        toggle breakpoint\n"
-		" c/C      toggle (c)ursor and (C)olors\n"
-		" d[f?]    define function, data, code, ..\n"
-		" D        enter visual diff mode (set diff.from/to)\n"
-		" e        edit eval configuration variables\n"
-		" f/F      set/unset or browse flags. f- to unset, F to browse, ..\n"
-		" gG       go seek to begin and end of file (0-$s)\n"
-		" hjkl     move around (or HJKL) (left-down-up-right)\n"
-		" i        insert hex or string (in hexdump) use tab to toggle\n"
-		" mK/'K    mark/go to Key (any key)\n"
-		" M        walk the mounted filesystems\n"
-		" n/N      seek next/prev function/flag/hit (scr.nkey)\n"
-		" o        go/seek to given offset\n"
-		" O        toggle asm.pseudo and asm.esil\n"
-		" p/P      rotate print modes (hex, disasm, debug, words, buf)\n"
-		" q        back to radare shell\n"
-		" r        toggle jmphints/leahints\n"
-		" R        randomize color palette (ecr)\n"
-		" sS       step / step over\n"
-		" T        enter textlog chat console (TT)\n"
-		" uU       undo/redo seek\n"
-		" v        visual function/vars code analysis menu\n"
-		" V        (V)iew interactive ascii art graph (agfv)\n"
-		" wW       seek cursor to next/prev word\n"
-		" xX       show xrefs/refs of current function from/to data/code\n"
-		" yY       copy and paste selection\n"
-		" z        fold/unfold comments in disassembly\n"
-		" Z        toggle zoom mode\n"
-		" Enter    follow address of jump/call\n"
-		"Function Keys: (See 'e key.'), defaults to:\n"
-		"  F2      toggle breakpoint\n"
-		"  F4      run to cursor\n"
-		"  F7      single step\n"
-		"  F8      step over\n"
-		"  F9      continue\n",
-		"?");
+	append_help (p, "Visual mode help", help_msg_visual);
+	append_help (p, "Function Keys: (See 'e key.'), defaults to", help_msg_visual_fn);
+	int ret = r_cons_less_str (r_strbuf_get (p), "?");
+	r_strbuf_free (p);
+	return ret;
 }
 
 static void prompt_read(const char *p, char *buf, int buflen) {
@@ -431,6 +466,8 @@ static void visual_single_step_in(RCore *core) {
 }
 
 static void visual_single_step_over(RCore *core) {
+	bool io_cache = r_config_get_i (core->config, "io.cache");
+	r_config_set_i (core->config, "io.cache", false);
 	if (r_config_get_i (core->config, "cfg.debug")) {
 		if (core->print->cur_enabled) {
 			r_core_cmd (core, "dcr", 0);
@@ -443,6 +480,7 @@ static void visual_single_step_over(RCore *core) {
 		r_core_cmd (core, "aeso", 0);
 		r_core_cmd (core, ".ar*", 0);
 	}
+	r_config_set_i (core->config, "io.cache", io_cache);
 }
 
 static void visual_breakpoint(RCore *core) {
@@ -817,7 +855,7 @@ static ut64 prevop_addr(RCore *core, ut64 addr) {
 	r_io_read_at (core->io, base, buf, sizeof (buf));
 	for (i = 0; i < sizeof (buf); i++) {
 		ret = r_anal_op (core->anal, &op, base + i,
-			buf + i, sizeof (buf) - i, R_ANAL_OP_MASK_ALL);
+			buf + i, sizeof (buf) - i, R_ANAL_OP_MASK_BASIC);
 		if (!ret) {
 			continue;
 		}
@@ -870,11 +908,11 @@ R_API ut64 r_core_prevop_addr_force(RCore *core, ut64 start_addr, int numinstrs)
 R_API int offset_history_up(RLine *line) {
 	RCore *core = line->user;
 	RIOUndo *undo = &core->io->undo;
-	if (line->offset_index <= -undo->undos) {
+	if (line->offset_hist_index <= -undo->undos) {
 		return false;
 	}
-	line->offset_index--;
-	ut64 off = undo->seek[undo->idx + line->offset_index].off;
+	line->offset_hist_index--;
+	ut64 off = undo->seek[undo->idx + line->offset_hist_index].off;
 	RFlagItem *f = r_flag_get_at (core->flags, off, false);
 	char *command;
 	if (f && f->offset == off && f->offset > 0) {
@@ -891,16 +929,16 @@ R_API int offset_history_up(RLine *line) {
 R_API int offset_history_down(RLine *line) {
 	RCore *core = line->user;
 	RIOUndo *undo = &core->io->undo;
-	if (line->offset_index >= undo->redos) {
+	if (line->offset_hist_index >= undo->redos) {
 		return false;
 	}
-	line->offset_index++;
-	if (line->offset_index == undo->redos) {
+	line->offset_hist_index++;
+	if (line->offset_hist_index == undo->redos) {
 		line->buffer.data[0] = '\0';
 		line->buffer.index = line->buffer.length = 0;
 		return false;
 	}
-	ut64 off = undo->seek[undo->idx + line->offset_index].off;
+	ut64 off = undo->seek[undo->idx + line->offset_hist_index].off;
 	RFlagItem *f = r_flag_get_at (core->flags, off, false);
 	char *command;
 	if (f && f->offset == off && f->offset > 0) {
@@ -929,9 +967,9 @@ static void visual_offset(RCore *core) {
 		}
 		r_core_cmd0 (core, buf);
 		restore_current_addr (core, addr, bsze, newaddr);
-		r_line_set_hist_callback (core->cons->line, &cmd_history_up, &cmd_history_down);
-		core->cons->line->offset_prompt = false;
 	}
+	r_line_set_hist_callback (core->cons->line, &cmd_history_up, &cmd_history_down);
+	core->cons->line->offset_prompt = false;
 }
 
 static int prevopsz(RCore *core, ut64 addr) {
@@ -1582,6 +1620,7 @@ R_API void r_core_visual_browse(RCore *core) {
 		" v  vars\n"
 		" x  xrefs\n"
 		" X  refs\n"
+		" :  run command\n"
 	;
 	for (;;) {
 		r_cons_clear00 ();
@@ -1593,7 +1632,8 @@ R_API void r_core_visual_browse(RCore *core) {
 			r_core_visual_trackflags (core);
 			break;
 		case 'F':
-			r_core_cmd0 (core, "s $(afl~...)");
+			r_core_visual_anal (core);
+			// r_core_cmd0 (core, "s $(afl~...)");
 			break;
 		case 'c':
 			r_core_visual_classes (core);
@@ -1642,6 +1682,10 @@ R_API void r_core_visual_browse(RCore *core) {
 		case '_':
 			r_core_visual_hudstuff (core);
 			break;
+		case ':':
+			r_core_visual_prompt_input (core);
+			break;
+		case 127: // backspace
 		case 'q':
 			return;
 		}
@@ -1726,7 +1770,7 @@ R_API int r_core_visual_cmd(RCore *core, const char *arg) {
 				r_cons_enable_mouse (true);
 			}
 			do {
-				op = r_core_anal_op (core, core->offset + core->print->cur);
+				op = r_core_anal_op (core, core->offset + core->print->cur, R_ANAL_OP_MASK_BASIC);
 				if (op) {
 					if (op->type == R_ANAL_OP_TYPE_JMP ||
 					op->type == R_ANAL_OP_TYPE_CJMP ||
@@ -2480,6 +2524,9 @@ R_API int r_core_visual_cmd(RCore *core, const char *arg) {
 		case ')':
 			rotateAsmemu (core);
 			break;
+		case '#':
+			r_config_toggle (core->config, "asm.bytes");
+			break;
 		case '*':
 			if (core->print->cur_enabled) {
 				r_core_cmdf (core, "dr PC=0x%08"PFMT64x, core->offset + core->print->cur);
@@ -2693,7 +2740,7 @@ R_API void r_core_visual_title(RCore *core, int color) {
 	static ut64 oldpc = 0;
 	const char *BEGIN = core->cons->pal.prompt;
 	const char *filename;
-	char pos[512], foo[512], bar[512], pcs[32];
+	char pos[512], bar[512], pcs[32];
 	if (!oldpc) {
 		oldpc = r_debug_reg_get (core->dbg, "PC");
 	}
@@ -2825,7 +2872,7 @@ R_API void r_core_visual_title(RCore *core, int color) {
 		ut64 sz = r_io_size (core->io);
 		ut64 pa;
 		{
-			RIOSection *s = r_io_section_vget (core->io, core->offset); 
+			RIOSection *s = r_io_section_vget (core->io, core->offset);
 			pa =  s ? core->offset - s->vaddr + s->paddr : core->offset;
 		}
 		if (sz == UT64_MAX) {
@@ -2839,22 +2886,26 @@ R_API void r_core_visual_title(RCore *core, int color) {
 			sprintf (pcs, "%d%% ", pc);
 		}
 	}
-	if (__ime) {
-		snprintf (foo, sizeof (foo), "[0x%08"PFMT64x " + %d> * INSERT MODE *\n",
-			core->offset, core->print->cur);
-	} else {
-		if (core->print->cur_enabled) {
-			snprintf (foo, sizeof (foo), "[0x%08"PFMT64x " %s%d (0x%x:%d=%d)]> %s %s\n",
-				core->offset, pcs, core->blocksize,
-				core->print->cur, core->print->ocur, core->print->ocur == -1 ?
-				1: R_ABS (core->print->cur - core->print->ocur) + 1,
-				bar, pos);
+	{
+		char *title;
+		if (__ime) {
+			title = r_str_newf ("[0x%08"PFMT64x " + %d> * INSERT MODE *\n",
+				core->offset, core->print->cur);
 		} else {
-			snprintf (foo, sizeof (foo), "[0x%08"PFMT64x " %s%d %s]> %s %s\n",
-				core->offset, pcs, core->blocksize, filename, bar, pos);
+			if (core->print->cur_enabled) {
+				title = r_str_newf ("[0x%08"PFMT64x " %s%d (0x%x:%d=%d)]> %s %s\n",
+					core->offset, pcs, core->blocksize,
+					core->print->cur, core->print->ocur, core->print->ocur == -1 ?
+					1: R_ABS (core->print->cur - core->print->ocur) + 1,
+					bar, pos);
+			} else {
+				title = r_str_newf ("[0x%08"PFMT64x " %s%d %s]> %s %s\n",
+					core->offset, pcs, core->blocksize, filename, bar, pos);
+			}
 		}
+		r_cons_print (title);
+		free (title);
 	}
-	r_cons_print (foo);
 	if (color) {
 		r_cons_strcat (Color_RESET);
 	}
@@ -3024,6 +3075,10 @@ static void visual_refresh(RCore *core) {
 	}
 }
 
+static void visual_refresh_oneshot(RCore *core) {
+	r_core_task_enqueue_oneshot (core, (RCoreTaskOneShot) visual_refresh, core);
+}
+
 R_API int r_core_visual(RCore *core, const char *input) {
 	const char *cmdprompt, *teefile;
 	ut64 scrseek;
@@ -3114,8 +3169,9 @@ dodo:
 		if (wheel) {
 			r_cons_enable_mouse (true);
 		}
+		core->cons->event_resize = NULL; // avoid running old event with new data
 		core->cons->event_data = core;
-		core->cons->event_resize = (RConsEvent) visual_refresh;
+		core->cons->event_resize = (RConsEvent) visual_refresh_oneshot;
 		flags = core->print->flags;
 		color = r_config_get_i (core->config, "scr.color");
 		if (color) {

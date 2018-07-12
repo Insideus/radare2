@@ -86,7 +86,9 @@ static int verify_version(int show) {
 		{ "r_hash", &r_hash_version },
 		{ "r_fs", &r_fs_version },
 		{ "r_io", &r_io_version },
+#if !USE_LIB_MAGIC
 		{ "r_magic", &r_magic_version },
+#endif
 		{ "r_parse", &r_parse_version },
 		{ "r_reg", &r_reg_version },
 		{ "r_sign", &r_sign_version },
@@ -359,7 +361,8 @@ static bool run_commands(RList *cmds, RList *files, bool quiet) {
 	}
 	/* -c */
 	r_list_foreach (cmds, iter, cmdn) {
-		r_core_cmd0 (&r, cmdn);
+		//r_core_cmd0 (&r, cmdn);
+		r_core_cmd (&r, cmdn, false);
 		r_cons_flush ();
 	}
 	if (quiet) {
@@ -492,6 +495,7 @@ int main(int argc, char **argv, char **envp) {
 		return main_help (1);
 	}
 	r_core_init (&r);
+	r_core_task_sync_begin (&r);
 	if (argc == 2 && !strcmp (argv[1], "-p")) {
 		r_core_project_list (&r, 0);
 		r_cons_flush ();
@@ -699,11 +703,7 @@ int main(int argc, char **argv, char **envp) {
 			eprintf ("Failed to close stderr");
 			return 1;
 		}
-#if __WINDOWS__ && !__CYGWIN__
-		const char nul[] = "nul";
-#else
-		const char nul[] = "/dev/null";
-#endif
+		const char nul[] = R_SYS_DEVNULL;
 		int new_stderr = open (nul, O_RDWR);
 		if (-1 == new_stderr) {
 			eprintf ("Failed to open %s", nul);
@@ -1241,10 +1241,10 @@ int main(int argc, char **argv, char **envp) {
 			}
 			nsha1 = r_config_get (r.config, "file.sha1");
 			npath = r_config_get (r.config, "file.path");
-			if (!quiet && sha1 && *sha1 && strcmp (sha1, nsha1)) {
+			if (!quiet && sha1 && *sha1 && nsha1 && strcmp (sha1, nsha1)) {
 				eprintf ("WARNING: file.sha1 change: %s => %s\n", sha1, nsha1);
 			}
-			if (!quiet && path && *path && strcmp (path, npath)) {
+			if (!quiet && path && *path && npath && strcmp (path, npath)) {
 				eprintf ("WARNING: file.path change: %s => %s\n", path, npath);
 			}
 			free (sha1);
@@ -1446,6 +1446,9 @@ beach:
 		exit (ret);
 		return ret;
 	}
+
+	r_core_task_sync_end (&r);
+
 	// not really needed, cause r_core_fini will close the file
 	// and this fh may be come stale during the command
 	// execution.

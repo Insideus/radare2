@@ -1,4 +1,4 @@
-/* radare2 - LGPL - Copyright 2017 - condret, MaskRay */
+/* radare2 - LGPL - Copyright 2017-2018 - condret, MaskRay */
 
 #include <r_io.h>
 #include <stdlib.h>
@@ -7,7 +7,7 @@
 #include "r_util.h"
 #include "r_vector.h"
 
-#define END_OF_MAP_IDS  0xffffffff
+#define END_OF_MAP_IDS UT32_MAX
 
 #define MAP_USE_HALF_CLOSED 0
 
@@ -152,6 +152,7 @@ R_API RIOMap* r_io_map_new(RIO* io, int fd, int flags, ut64 delta, ut64 addr, ut
 	map->fd = fd;
 	map->delta = delta;
 	if ((UT64_MAX - size + 1) < addr) {
+		/// XXX: this is leaking a map!!!
 		r_io_map_new (io, fd, flags, delta - addr, 0LL, size + addr, do_skyline);
 		size = -(st64)addr;
 	}
@@ -355,6 +356,23 @@ R_API bool r_io_map_priorize(RIO* io, ut32 id) {
 	return false;
 }
 
+R_API bool r_io_map_depriorize(RIO* io, ut32 id) {
+	if (io) {
+		RIOMap* map;
+		SdbListIter* iter;
+		ls_foreach (io->maps, iter, map) {
+			// search for iter with the correct map
+			if (map->id == id) {
+				ls_split_iter (io->maps, iter);
+				ls_prepend (io->maps, map);
+				r_io_map_calculate_skyline (io);
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 R_API bool r_io_map_priorize_for_fd(RIO* io, int fd) {
 	SdbListIter* iter, * ator;
 	RIOMap *map;
@@ -461,6 +479,24 @@ R_API RIOMap* r_io_map_add_next_available(RIO* io, int fd, int flags, ut64 delta
 		break;
 	}
 	return r_io_map_new (io, fd, flags, delta, next_addr, size, true);
+}
+
+R_API ut64 r_io_map_next_address(RIO* io, ut64 addr) {
+	RIOMap* map;
+	SdbListIter* iter;
+	ut64 lowest = UT64_MAX;
+
+	ls_foreach (io->maps, iter, map) {
+		ut64 from = r_itv_begin (map->itv);
+		if (from > addr && addr < lowest) {
+			lowest = from;
+		}
+		ut64 to = r_itv_end (map->itv);
+		if (to > addr && to < lowest) {
+			lowest = to;
+		}
+	}
+	return lowest;
 }
 
 R_API RList* r_io_map_get_for_fd(RIO* io, int fd) {

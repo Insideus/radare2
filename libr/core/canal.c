@@ -816,7 +816,7 @@ error:
 }
 
 /* decode and return the RANalOp at the address addr */
-R_API RAnalOp* r_core_anal_op(RCore *core, ut64 addr) {
+R_API RAnalOp* r_core_anal_op(RCore *core, ut64 addr, int mask) {
 	int len;
 	RAnalOp *op;
 	ut8 buf[128];
@@ -844,7 +844,7 @@ R_API RAnalOp* r_core_anal_op(RCore *core, ut64 addr) {
 		ptr = buf;
 		len = sizeof (buf);
 	}
-	if (r_anal_op (core->anal, op, addr, ptr, len, R_ANAL_OP_MASK_ALL) < 1) {
+	if (r_anal_op (core->anal, op, addr, ptr, len, mask) < 1) {
 		goto err_op;
 	}
 
@@ -871,6 +871,9 @@ static void print_hint_h_format(RAnalHint* hint) {
 	HINTCMD (hint, esil, " esil='%s'", false);
 	if (hint->jump != UT64_MAX) {
 		r_cons_printf (" jump: 0x%"PFMT64x, hint->jump);
+	}
+	if (hint->ret != UT64_MAX) {
+		r_cons_printf (" ret: 0x%"PFMT64x, hint->ret);
 	}
 	r_cons_newline ();
 }
@@ -1338,8 +1341,7 @@ static int core_anal_graph_nodes(RCore *core, RAnalFunction *fcn, int opts) {
 
 /* analyze a RAnalBlock at the address at and add that to the fcn function. */
 R_API int r_core_anal_bb(RCore *core, RAnalFunction *fcn, ut64 at, int head) {
-	RAnalBlock *bb, *bbi;
-	RListIter *iter;
+	RAnalBlock *bb;
 	ut64 jump, fail;
 	ut8 *buf = NULL;
 	int buflen, bblen = 0, rc = true;
@@ -1354,15 +1356,7 @@ R_API int r_core_anal_bb(RCore *core, RAnalFunction *fcn, ut64 at, int head) {
 		return false;
 	}
 
-	if (core->anal->split) {
-		ret = r_anal_fcn_split_bb (core->anal, fcn, bb, at);
-	} else {
-		r_list_foreach (fcn->bbs, iter, bbi) {
-			if (at == bbi->addr) {
-				ret = R_ANAL_RET_DUP;
-			}
-		}
-	}
+	ret = r_anal_fcn_split_bb (core->anal, fcn, bb, at);
 	if (ret == R_ANAL_RET_DUP) {
 		/* Dupped basic block */
 		goto error;
@@ -1394,9 +1388,7 @@ R_API int r_core_anal_bb(RCore *core, RAnalFunction *fcn, ut64 at, int head) {
 				goto error;
 			}
 			if (bblen == R_ANAL_RET_END) { /* bb analysis complete */
-				if (core->anal->split) {
-					ret = r_anal_fcn_bb_overlaps (fcn, bb);
-				}
+				ret = r_anal_fcn_bb_overlaps (fcn, bb);
 				if (ret == R_ANAL_RET_NEW) {
 					r_anal_fcn_bbadd (fcn, bb);
 					fail = bb->fail;
@@ -1455,7 +1447,7 @@ R_API int r_core_anal_esil_fcn(RCore *core, ut64 at, ut64 from, int reftype, int
 	eprintf ("TODO\n");
 	while (1) {
 		// TODO: Implement the proper logic for doing esil analysis
-		op = r_core_anal_op (core, at);
+		op = r_core_anal_op (core, at, R_ANAL_OP_MASK_ESIL);
 		if (!op) {
 			break;
 		}
@@ -1615,6 +1607,8 @@ R_API int r_core_print_bb_custom(RCore *core, RAnalFunction *fcn) {
 			free (body_b64);
 			free (body);
 			free (title);
+			r_config_restore (hc);
+			r_config_hold_free (hc);
 			return false;
 		}
 		body_b64 = r_str_prefix (body_b64, "base64:");
@@ -1635,10 +1629,12 @@ R_API int r_core_print_bb_custom(RCore *core, RAnalFunction *fcn) {
 		if (bb->jump != UT64_MAX) {
 			v = get_title (bb->jump);
 			r_cons_printf ("age %s %s\n", u, v);
+			free (v);
 		}
 		if (bb->fail != UT64_MAX) {
 			v = get_title (bb->fail);
 			r_cons_printf ("age %s %s\n", u, v);
+			free (v);
 		}
 		if (bb->switch_op) {
 			RListIter *it;
@@ -1646,10 +1642,10 @@ R_API int r_core_print_bb_custom(RCore *core, RAnalFunction *fcn) {
 			r_list_foreach (bb->switch_op->cases, it, cop) {
 				v = get_title (cop->addr);
 				r_cons_printf ("age %s %s\n", u, v);
+				free (v);
 			}
 		}
 		free (u);
-		free (v);
 	}
 	return true;
 }
@@ -1670,6 +1666,7 @@ R_API int r_core_print_bb_gml(RCore *core, RAnalFunction *fcn) {
 				"    id  %"PFMT64d"\n"
 				"    label  \"%s\"\n"
 				"  ]\n", bb->addr, msg);
+		free (msg);
 	}
 
 	r_list_foreach (fcn->bbs, iter, bb) {
@@ -2545,7 +2542,7 @@ R_API int r_core_anal_fcn_list(RCore *core, const char *input, const char *rad) 
 
 	r_list_sort (fcns, &cmpfcn);
 	switch (*rad) {
-	case 's':
+	case '+':
 		r_core_anal_fcn_list_size (core);
 		break;
 	case 'l':
@@ -2603,11 +2600,13 @@ static RList *recurse(RCore *core, RAnalBlock *from, RAnalBlock *dest) {
 	return NULL;
 }
 
-R_API void fcn_callconv(RCore *core, RAnalFunction *fcn) {
-	ut8 *tbuf, *buf;
+R_API void r_core_recover_vars(RCore *core, RAnalFunction *fcn, bool argonly) {
+	ut8 *buf;
 	RListIter *tmp = NULL;
 	RAnalBlock *bb = NULL;
 	RAnalOp *op = NULL;
+	int count = 0;
+	int reg_set[10] = {0};
 	ut64 pos;
 
 	if (!core || !core->anal || !fcn || core->anal->opt.bb_max_size < 1) {
@@ -2626,16 +2625,10 @@ R_API void fcn_callconv(RCore *core, RAnalFunction *fcn) {
 			continue;
 		}
 		if (bb->size > bb_size) {
-			tbuf = realloc (buf, bb->size);
-			if (!tbuf) {
-				eprintf ("Cannot realloc bb to %d\n", (int)bb->size);
-				continue;
-			}
-			buf = tbuf;
-			bb_size = bb->size;
+			continue;
 		}
 		if (!r_io_read_at (core->io, bb->addr, buf, bb->size)) {
-	//		eprintf ("read error\n");
+			//eprintf ("read error\n");
 			break;
 		}
 		pos = bb->addr;
@@ -2643,12 +2636,15 @@ R_API void fcn_callconv(RCore *core, RAnalFunction *fcn) {
 			if (r_cons_is_breaked ()) {
 				break;
 			}
-			op = r_core_anal_op (core, pos);
+			op = r_core_anal_op (core, pos, R_ANAL_OP_MASK_ALL);
 			if (!op) {
-	//			eprintf ("Cannot get op\n");
+				//eprintf ("Cannot get op\n");
 				break;
 			}
-			r_anal_fcn_fill_args (core->anal, fcn, op);
+			extract_rarg (core->anal, op, fcn, reg_set, &count);
+			if (!argonly) {
+				extract_vars (core->anal, fcn, op);
+			}
 			int opsize = op->size;
 			r_anal_op_free (op);
 			if (opsize < 1) {
@@ -2657,7 +2653,6 @@ R_API void fcn_callconv(RCore *core, RAnalFunction *fcn) {
 			pos += opsize;
 		}
 	}
-
 	free (buf);
 	return;
 }
@@ -2820,14 +2815,14 @@ static bool opiscall(RCore *core, RAnalOp *aop, ut64 addr, const ut8* buf, int l
 		}
 		//if is not bl do not analyze
 		if (buf[3] == 0x94) {
-			if (r_anal_op (core->anal, aop, addr, buf, len, R_ANAL_OP_MASK_ALL)) {
+			if (r_anal_op (core->anal, aop, addr, buf, len, R_ANAL_OP_MASK_BASIC)) {
 				return true;
 			}
 		}
 		return false;
 	default:
 		aop->size = 1;
-		if (!r_anal_op (core->anal, aop, addr, buf, len, R_ANAL_OP_MASK_ALL)) {
+		if (!r_anal_op (core->anal, aop, addr, buf, len, R_ANAL_OP_MASK_BASIC)) {
 			switch (aop->type) {
 			case R_ANAL_OP_TYPE_CALL:
 			case R_ANAL_OP_TYPE_CCALL:
@@ -2910,7 +2905,7 @@ R_API int r_core_anal_search(RCore *core, ut64 from, ut64 to, ut64 ref, int mode
 				case 'x':
 					{
 						RAnalOp op ={0};
-						r_anal_op (core->anal, &op, at + i, buf + i, core->blocksize - i, R_ANAL_OP_MASK_ALL);
+						r_anal_op (core->anal, &op, at + i, buf + i, core->blocksize - i, R_ANAL_OP_MASK_BASIC);
 						int mask = mode=='r' ? 1 : mode == 'w' ? 2: mode == 'x' ? 4: 0;
 						if (op.direction == mask) {
 							i += op.size;
@@ -2920,7 +2915,7 @@ R_API int r_core_anal_search(RCore *core, ut64 from, ut64 to, ut64 ref, int mode
 					}
 					break;
 				default:
-					if (!r_anal_op (core->anal, &op, at + i, buf + i, core->blocksize - i, R_ANAL_OP_MASK_ALL)) {
+					if (!r_anal_op (core->anal, &op, at + i, buf + i, core->blocksize - i, R_ANAL_OP_MASK_BASIC)) {
 						r_anal_op_fini (&op);
 						continue;
 					}
@@ -3179,7 +3174,7 @@ R_API int r_core_anal_ref_list(RCore *core, int rad) {
 static bool isValidSymbol(RBinSymbol *symbol) {
 	if (symbol && symbol->type) {
 		const char *type = symbol->type;
-		return (!strcmp (type, "FUNC") || !strcmp (type, "METH"));
+		return (!strcmp (type, R_BIN_TYPE_FUNC_STR) || !strcmp (type, "METH"));
 	}
 	return false;
 }
@@ -3240,6 +3235,7 @@ R_API int r_core_anal_all(RCore *core) {
 			if (r_cons_is_breaked ()) {
 				break;
 			}
+			r_core_recover_vars (core, fcni, true);
 			if (!strncmp (fcni->name, "sym.", 4) || !strncmp (fcni->name, "main", 4)) {
 				fcni->type = R_ANAL_FCN_TYPE_SYM;
 			}
@@ -3363,6 +3359,10 @@ R_API RCoreAnalStats* r_core_anal_get_stats(RCore *core, ut64 from, ut64 to, ut6
 		}
 		piece = (F->addr - from) / step;
 		as->block[piece].functions++;
+		int last_piece = R_MIN ((F->addr + F->_size - 1) / step, blocks - 1);
+		for (; piece <= last_piece; piece++) {
+			as->block[piece].in_functions++;
+		}
 	}
 	// iter all symbols
 	r_list_foreach (r_bin_get_symbols (core->bin), iter, S) {
@@ -3410,7 +3410,7 @@ R_API RList* r_core_anal_cycles(RCore *core, int ccl) {
 	cf = r_anal_cycle_frame_new ();
 	r_cons_break_push (NULL, NULL);
 	while (cf && !r_cons_is_breaked ()) {
-		if ((op = r_core_anal_op (core, addr)) && (op->cycles) && (ccl > 0)) {
+		if ((op = r_core_anal_op (core, addr, R_ANAL_OP_MASK_BASIC)) && (op->cycles) && (ccl > 0)) {
 			r_cons_clear_line (1);
 			eprintf ("%i -- ", ccl);
 			addr += op->size;
@@ -3832,7 +3832,7 @@ static void getpcfromstack(RCore *core, RAnalEsil *esil) {
 
 	// TODO Hardcoding for 2 instructions (mov e_p,[esp];ret). More work needed
 	idx = 0;
-	if (r_anal_op (core->anal, &op, cur, buf + idx, size - idx, R_ANAL_OP_MASK_ALL) <= 0 ||
+	if (r_anal_op (core->anal, &op, cur, buf + idx, size - idx, R_ANAL_OP_MASK_ESIL) <= 0 ||
 			op.size <= 0 ||
 			(op.type != R_ANAL_OP_TYPE_MOV && op.type != R_ANAL_OP_TYPE_CMOV)) {
 		goto err_anal_op;
@@ -3871,7 +3871,7 @@ static void getpcfromstack(RCore *core, RAnalEsil *esil) {
 
 	cur = addr + idx;
 	r_anal_op_fini (&op);
-	if (r_anal_op (core->anal, &op, cur, buf + idx, size - idx, R_ANAL_OP_MASK_ALL) <= 0 ||
+	if (r_anal_op (core->anal, &op, cur, buf + idx, size - idx, R_ANAL_OP_MASK_ESIL) <= 0 ||
 			op.size <= 0 ||
 			(op.type != R_ANAL_OP_TYPE_RET && op.type != R_ANAL_OP_TYPE_CRET)) {
 		goto err_anal_op;
@@ -4269,7 +4269,7 @@ static void analPaths (RCoreAnalPaths *p) {
 			int i;
 			for (i = 0; i < cur->op_pos_size; i++) {
 				ut64 addr = cur->addr + cur->op_pos[i];
-				RAnalOp *op = r_core_anal_op (p->core, addr);
+				RAnalOp *op = r_core_anal_op (p->core, addr, R_ANAL_OP_MASK_BASIC);
 				if (op && op->type == R_ANAL_OP_TYPE_CALL) {
 					cur = c;
 					analPathFollow (p, op->jump);

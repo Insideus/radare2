@@ -205,6 +205,12 @@ static int cb_analafterjmp(void *user, void *data) {
 	return true;
 }
 
+static int cb_anal_endsize(void *user, void *data) {
+	RCore *core = (RCore*) user;
+	RConfigNode *node = (RConfigNode*) data;
+	core->anal->opt.endsize = node->i_value;
+	return true;
+}
 static int cb_analvars(void *user, void *data) {
         RCore *core = (RCore*) user;
         RConfigNode *node = (RConfigNode*) data;
@@ -246,13 +252,6 @@ static int cb_analhpskip (void *user, void *data) {
 	RCore *core = (RCore*) user;
 	RConfigNode *node = (RConfigNode*) data;
 	core->anal->opt.hpskip = node->i_value;
-	return true;
-}
-
-static int cb_analbbsplit (void *user, void *data) {
-	RCore *core = (RCore*) user;
-	RConfigNode *node = (RConfigNode*) data;
-	core->anal->opt.bbsplit = node->i_value;
 	return true;
 }
 
@@ -307,13 +306,6 @@ static int cb_analcpu(void *user, void *data) {
 		int v = r_anal_archinfo (core->anal, R_ANAL_ARCHINFO_ALIGN);
 		r_config_set_i (core->config, "asm.pcalign", (v != -1)? v: 0);
 	}
-	return true;
-}
-
-static int cb_analsplit(void *user, void *data) {
-	RCore *core = (RCore*) user;
-	RConfigNode *node = (RConfigNode*) data;
-	core->anal->split = node->i_value;
 	return true;
 }
 
@@ -431,8 +423,8 @@ static int cb_asmarch(void *user, void *data) {
 		bits = core->anal->bits;
 	}
 	if (node->value[0] == '?') {
+		update_asmarch_options (core, node);
 		if (strlen (node->value) > 1 && node->value[1] == '?') {
-			update_asmarch_options (core, node);
 			/* print more verbose help instead of plain option values */
 			rasm2_list (core, NULL, node->value[1]);
 			return false;
@@ -584,12 +576,11 @@ static int cb_asmbits(void *user, void *data) {
 		ret = r_asm_set_bits (core->assembler, bits);
 		if (!ret) {
 			RAsmPlugin *h = core->assembler->cur;
-			if (h) {
-				eprintf ("Cannot set bits %d to '%s'\n", bits, h->name);
-			} else {
+			if (!h) {
 				eprintf ("e asm.bits: Cannot set value, no plugins defined yet\n");
 				ret = true;
 			}
+			// else { eprintf ("Cannot set bits %d to '%s'\n", bits, h->name); }
 		}
 		if (!r_anal_set_bits (core->anal, bits)) {
 			eprintf ("asm.arch: Cannot setup '%d' bits analysis engine\n", bits);
@@ -656,6 +647,13 @@ static void update_asmfeatures_options(RCore *core, RConfigNode *node) {
 			free (features);
 		}
 	}
+}
+
+static int cb_flag_realnames(void *user, void *data) {
+	RCore *core = (RCore *) user;
+	RConfigNode *node = (RConfigNode *) data;
+	core->flags->realnames = node->i_value;
+	return true;
 }
 
 static int cb_asmfeatures(void *user, void *data) {
@@ -1561,6 +1559,16 @@ static int cb_ioaslr(void *user, void *data) {
 	return true;
 }
 
+static int cb_io_pava(void *user, void *data) {
+	RCore *core = (RCore *) user;
+	RConfigNode *node = (RConfigNode *) data;
+	core->pava = node->i_value;
+	if (node->i_value && core->io->va) {
+		eprintf ("WARNING: You may probably want to disable io.va too\n");
+	}
+	return true;
+}
+
 static int cb_iova(void *user, void *data) {
 	RCore *core = (RCore *) user;
 	RConfigNode *node = (RConfigNode *) data;
@@ -1899,14 +1907,14 @@ static int cb_zoombyte(void *user, void *data) {
 	RCore *core = (RCore *) user;
 	RConfigNode *node = (RConfigNode *) data;
 	switch (*node->value) {
-		case 'p': case 'f': case 's': case '0':
-		case 'F': case 'e': case 'h':
-			core->print->zoom->mode = *node->value;
-			break;
-		default:
-			r_cons_printf ("p\nf\ns\n0\nF\ne\nh\n");
-			// eprintf ("Invalid zoom.byte value. See pz? for help\n");
-			return false;
+	case 'p': case 'f': case 's': case '0':
+	case 'F': case 'e': case 'h':
+		core->print->zoom->mode = *node->value;
+		break;
+	default:
+		eprintf ("Invalid zoom.byte value. See pz? for help\n");
+		r_cons_printf ("pzp\npzf\npzs\npz0\npzF\npze\npzh\n");
+		return false;
 	}
 	return true;
 }
@@ -2362,6 +2370,7 @@ R_API int r_core_config_init(RCore *core) {
 	SETCB ("anal.armthumb", "false", &cb_analarmthumb, "aae computes arm/thumb changes (lot of false positives ahead)");
 	SETCB ("anal.eobjmp", "false", &cb_analeobjmp, "jmp is end of block mode (option)");
 	SETCB ("anal.afterjmp", "true", &cb_analafterjmp, "Continue analysis after jmp/ujmp");
+	SETCB ("anal.endsize", "true", &cb_anal_endsize, "Adjust function size at the end of the analysis (known to be buggy)");
 	SETICB ("anal.depth", 64, &cb_analdepth, "Max depth at code analysis"); // XXX: warn if depth is > 50 .. can be problematic
 	SETICB ("anal.sleep", 0, &cb_analsleep, "Sleep N usecs every so often during analysis. Avoid 100% CPU usage");
 	SETPREF ("anal.calls", "false", "Make basic af analysis walk into calls");
@@ -2380,13 +2389,12 @@ R_API int r_core_config_init(RCore *core) {
 	update_analarch_options (core, n);
 	SETCB ("anal.cpu", R_SYS_ARCH, &cb_analcpu, "Specify the anal.cpu to use");
 	SETPREF ("anal.prelude", "", "Specify an hexpair to find preludes in code");
-	SETCB ("anal.split", "true", &cb_analsplit, "Split functions into basic blocks in analysis");
 	SETCB ("anal.recont", "false", &cb_analrecont, "End block after splitting a basic block instead of error"); // testing
 	SETCB ("anal.ijmp", "false", &cb_analijmp, "Follow the indirect jumps in function analysis"); // testing
 	SETI ("anal.ptrdepth", 3, "Maximum number of nested pointers to follow in analysis");
 	SETICB ("anal.maxreflines", 0, &cb_analmaxrefs, "Maximum number of reflines to be analyzed and displayed in asm.lines with pd");
 
-	SETCB ("anal.jmptbl", "false", &cb_anal_jmptbl, "Analyze jump tables in switch statements");
+	SETCB ("anal.jmptbl", "true", &cb_anal_jmptbl, "Analyze jump tables in switch statements");
 
 	SETCB ("anal.cjmpref", "false", &cb_anal_cjmpref, "Create references for conditional jumps");
 	SETCB ("anal.jmpref", "true", &cb_anal_jmpref, "Create references for unconditional jumps");
@@ -2396,7 +2404,6 @@ R_API int r_core_config_init(RCore *core) {
 	SETCB ("anal.brokenrefs", "false", &cb_anal_brokenrefs, "Follow function references as well if function analysis was failed");
 
 	SETCB ("anal.refstr", "false", &cb_anal_searchstringrefs, "Search string references in data references");
-	SETCB ("anal.bb.split", "true", &cb_analbbsplit, "Use the experimental basic block split for JMPs");
 	SETCB ("anal.bb.align", "0x10", &cb_anal_bbs_alignment, "Possible space between basic blocks");
 	SETCB ("anal.bb.maxsize", "1024", &cb_anal_bb_max_size, "Maximum basic block size");
 	SETCB ("anal.pushret", "false", &cb_anal_pushret, "Analyze push+ret as jmp");
@@ -2426,7 +2433,8 @@ R_API int r_core_config_init(RCore *core) {
 	n = NODECB ("asm.os", R_SYS_OS, &cb_asmos);
 	SETDESC (n, "Select operating system (kernel)");
 	SETOPTIONS (n, "ios", "dos", "darwin", "linux", "freebsd", "openbsd", "netbsd", "windows", NULL);
-	SETI ("asm.maxrefs", 5,  "Maximum number of xrefs to be displayed as list (use columns above)");
+	SETI ("asm.xrefs.fold", 5,  "Maximum number of xrefs to be displayed as list (use columns above)");
+	SETI ("asm.xrefs.max", 20,  "Maximum number of xrefs to be displayed without folding");
 	SETCB ("asm.invhex", "false", &cb_asm_invhex, "Show invalid instructions as hexadecimal numbers");
 	SETPREF ("asm.meta", "true", "Display the code/data/format conversions in disasm");
 	SETPREF ("asm.bytes", "true", "Display the bytes of each instruction");
@@ -2445,7 +2453,7 @@ R_API int r_core_config_init(RCore *core) {
 	SETPREF ("asm.slow", "true", "Perform slow analysis operations in disasm");
 	SETPREF ("asm.decode", "false", "Use code analysis as a disassembler");
 	SETICB ("asm.imm.arm", false,  &cb_asm_armimm, "Display # for immediates in ARM");
-	SETPREF ("asm.imm.str", "false", "Show immediates values as strings");
+	SETPREF ("asm.imm.str", "true", "Show immediates values as strings");
 	SETPREF ("asm.imm.trim", "false", "Remove all offsets and constants from disassembly");
 	SETPREF ("asm.indent", "false", "Indent disassembly based on reflines depth");
 	SETI ("asm.indentspace", 2, "How many spaces to indent the code");
@@ -2474,9 +2482,11 @@ R_API int r_core_config_init(RCore *core) {
 	n = NODEICB ("asm.flags.middle", 2, &cb_midflags);
 	SETOPTIONS (n, "0 = do not show flag", "1 = show without realign", "2 = realign at middle flag",
 		"3 = realign at middle flag if sym.*", NULL);
+	SETCB ("asm.flags.real", "false", &cb_flag_realnames, "Show flags unfiltered realnames instead of names");
 	SETDESC (n, "Realign disassembly if there is a flag in the middle of an instruction");
 	SETPREF ("asm.lbytes", "true", "Align disasm bytes to left");
 	SETPREF ("asm.lines", "true", "Show ASCII-art lines at disassembly");
+	SETPREF ("asm.lines.bb", "true", "Show flow lines at jumps");
 	SETPREF ("asm.lines.call", "false", "Enable call lines");
 	SETPREF ("asm.lines.ret", "false", "Show separator lines after ret");
 	SETPREF ("asm.lines.out", "true", "Show out of block lines");
@@ -2557,6 +2567,8 @@ R_API int r_core_config_init(RCore *core) {
 	n = NODECB ("asm.strenc", "guess", &cb_asmstrenc);
 	SETDESC (n, "Assumed string encoding for disasm");
 	SETOPTIONS (n, "latin1", "utf8", "utf16le", "utf32le", "guess", NULL);
+
+	/* bin */
 	SETCB ("bin.usextr", "true", &cb_usextr, "Use extract plugins when loading files");
 	SETCB ("bin.useldr", "true", &cb_useldr, "Use loader plugins when loading files");
 	SETCB ("bin.strpurge", "", &cb_strpurge, "Purge strings (e bin.strpurge=? provides more detail)");
@@ -2570,8 +2582,6 @@ R_API int r_core_config_init(RCore *core) {
 	SETPREF ("bin.lang", "", "Language for bin.demangle");
 	SETPREF ("bin.demangle", "true", "Import demangled symbols from RBin");
 	SETCB ("bin.demanglecmd", "false", &cb_bdc, "run xcrun swift-demangle and similar if available (SLOW)");
-
-	/* bin */
 	SETI ("bin.baddr", -1, "Base address of the binary");
 	SETI ("bin.laddr", 0, "Base address for loading library ('*.so')");
 	SETCB ("bin.dbginfo", "true", &cb_bindbginfo, "Load debug information at startup if available");
@@ -2961,6 +2971,7 @@ R_API int r_core_config_init(RCore *core) {
 	SETICB ("io.0xff", 0xff, &cb_io_oxff, "Use this value instead of 0xff to fill unallocated areas");
 	SETCB ("io.aslr", "false", &cb_ioaslr, "Disable ASLR for spawn and such");
 	SETCB ("io.va", "true", &cb_iova, "Use virtual address layout");
+	SETCB ("io.pava", "false", &cb_io_pava, "Use EXPERIMENTAL paddr -> vaddr address mode");
 	SETCB ("io.autofd", "true", &cb_ioautofd, "Change fd when opening a new file");
 
 	/* file */

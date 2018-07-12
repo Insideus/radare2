@@ -22,6 +22,7 @@ R2_PATH = {
     'R2_ZIGNS': r'{R2_DATDIR}\zigns',
     'R2_THEMES': r'{R2_DATDIR}\cons',
     'R2_FORTUNES': r'{R2_DATDIR}\doc',
+    'R2_FLAGS': r'{R2_DATDIR}\flag',
     'R2_HUD': r'{R2_DATDIR}\hud'
 }
 
@@ -195,6 +196,8 @@ def win_dist_libr2(**path_fmt):
     copy(r'{BUILDDIR}\libr\bin\d\*.sdb', r'{DIST}\{R2_SDB}\format\dll')
     copytree(r'{ROOT}\libr\cons\d', r'{DIST}\{R2_THEMES}',
              exclude=('Makefile', 'meson.build'))
+    makedirs(r'{DIST}\{R2_FLAGS}')
+    copy(r'{BUILDDIR}\libr\flag\d\*.r2', r'{DIST}\{R2_FLAGS}')
     makedirs(r'{DIST}\{R2_HUD}')
     copy(r'{ROOT}\doc\hud', r'{DIST}\{R2_HUD}\main')
 
